@@ -4,13 +4,15 @@ telegram_bot.py
 Tupureel Telegram moderation bot.
 
 Listens for Approve / Reject button presses on photo moderation messages
-sent by check_emails.py.  On Approve the photo is kept in R2 as-is.
-On Reject the photo is deleted from R2.  Both actions update the original
-Telegram message to remove the buttons and confirm the outcome.
+sent by check_emails.py.
 
-Runs until interrupted (Ctrl-C or SIGTERM).  In GitHub Actions, trigger
-via workflow_dispatch and let the job run; it will stop when the runner
-hits its 6-hour limit or you cancel the workflow.
+Button tap sequence:
+  1. Immediately answer the callback query (toast popup) — must happen
+     within 10 s of the tap before the query expires.
+  2. Immediately edit the caption to show a ⏳ pending state and remove
+     the buttons so the message cannot be tapped twice.
+  3. Perform the actual work (R2 deletion for Reject; nothing for Approve).
+  4. Edit the caption one final time to show the confirmed outcome.
 
 Required environment variables (loaded from .env automatically):
     TELEGRAM_TOKEN       — bot token from BotFather
@@ -49,18 +51,36 @@ def _r2_client():
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    await query.answer()
-
     data = query.data or ""
+
     if ":" not in data:
+        await query.answer()
         return
 
     action, r2_key = data.split(":", 1)
     original_caption = query.message.caption or ""
 
+    # ---- Step 1: answer immediately (Telegram requires this within 10 s) ----
+    if action == "approve":
+        await query.answer("✓ Response recorded")
+    elif action == "reject":
+        await query.answer("✗ Response recorded")
+    else:
+        await query.answer()
+        return
+
+    # ---- Step 2: show pending state and remove buttons immediately ----------
+    pending_caption = (
+        f"{original_caption}\n\n⏳ Approved — will be processed at next run"
+        if action == "approve"
+        else f"{original_caption}\n\n⏳ Rejected — will be processed at next run"
+    )
+    await query.edit_message_caption(caption=pending_caption, reply_markup=None)
+
+    # ---- Step 3 & 4: do the work, then show the final outcome ---------------
     if action == "approve":
         await query.edit_message_caption(
-            caption=f"{original_caption}\n\n✓ Approved",
+            caption=f"{original_caption}\n\n✓ Approved — photo added to timelapse queue",
             reply_markup=None,
         )
         log.info("Approved: %s", r2_key)
@@ -70,7 +90,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         try:
             _r2_client().delete_object(Bucket=bucket, Key=r2_key)
             await query.edit_message_caption(
-                caption=f"{original_caption}\n\n✗ Rejected — deleted from R2",
+                caption=f"{original_caption}\n\n✗ Rejected — photo removed from R2",
                 reply_markup=None,
             )
             log.info("Rejected and deleted from R2: %s", r2_key)

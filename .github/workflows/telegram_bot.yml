@@ -1,6 +1,8 @@
 name: Telegram Moderation Bot
 
 on:
+  schedule:
+    - cron: '10 9 * * *'
   workflow_dispatch:
 
 jobs:
