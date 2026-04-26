@@ -6,10 +6,15 @@ Tupureel photopoint monitoring — Gmail ingestion script.
 Connects to Gmail via IMAP, finds unread emails addressed to
 photos@tupureel.org, saves any photo attachments to a local folder
 tree, and labels each email as either "processed" or "unknown-site".
+After saving locally, each photo is also uploaded to Google Drive under
+Tupureel Photos/{site_id}/{date}{ext}.  Drive upload failures are logged
+but do not affect local saving.
 
 Required environment variables (loaded from .env automatically):
-    GMAIL_ADDRESS      — the Gmail account used to receive photos
-    GMAIL_APP_PASSWORD — a Gmail App Password (not your main password)
+    GMAIL_ADDRESS            — the Gmail account used to receive photos
+    GMAIL_APP_PASSWORD       — a Gmail App Password (not your main password)
+    GOOGLE_CREDENTIALS_JSON  — full JSON key file contents for a service account
+    GOOGLE_DRIVE_FOLDER_ID   — Drive folder ID for the "Tupureel Photos" root
 
 Usage:
     python check_emails.py
@@ -17,7 +22,9 @@ Usage:
 
 import email
 import imaplib
+import json
 import logging
+import mimetypes
 import os
 import re
 import sys
@@ -28,6 +35,9 @@ from pathlib import Path
 
 import yaml
 from dotenv import load_dotenv
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload
 
 # Load environment variables from .env (does nothing if file is absent).
 load_dotenv()
@@ -168,6 +178,60 @@ def mark_read(imap: imaplib.IMAP4_SSL, uid: str) -> None:
     imap.uid("STORE", uid, "+FLAGS", "\\Seen")
 
 
+def get_or_create_drive_folder(service, parent_id: str, folder_name: str) -> str:
+    """Return the Drive folder ID for folder_name under parent_id, creating it if absent."""
+    query = (
+        f"name = '{folder_name}' "
+        f"and '{parent_id}' in parents "
+        f"and mimeType = 'application/vnd.google-apps.folder' "
+        f"and trashed = false"
+    )
+    results = service.files().list(q=query, fields="files(id)").execute()
+    files = results.get("files", [])
+    if files:
+        return files[0]["id"]
+
+    metadata = {
+        "name": folder_name,
+        "mimeType": "application/vnd.google-apps.folder",
+        "parents": [parent_id],
+    }
+    folder = service.files().create(body=metadata, fields="id").execute()
+    return folder["id"]
+
+
+def upload_to_drive(local_path: Path, site_id: str) -> None:
+    """Upload local_path to Google Drive under Tupureel Photos/{site_id}/."""
+    drive_folder_id = os.environ.get("GOOGLE_DRIVE_FOLDER_ID")
+    creds_json = os.environ.get("GOOGLE_CREDENTIALS_JSON")
+
+    if not drive_folder_id or not creds_json:
+        log.debug("Drive env vars not set — skipping Drive upload.")
+        return
+
+    try:
+        creds_info = json.loads(creds_json)
+        credentials = service_account.Credentials.from_service_account_info(
+            creds_info,
+            scopes=["https://www.googleapis.com/auth/drive"],
+        )
+        service = build("drive", "v3", credentials=credentials)
+
+        site_folder_id = get_or_create_drive_folder(service, drive_folder_id, site_id)
+
+        mime_type, _ = mimetypes.guess_type(str(local_path))
+        media = MediaFileUpload(str(local_path), mimetype=mime_type or "application/octet-stream")
+        file_metadata = {"name": local_path.name, "parents": [site_folder_id]}
+
+        result = service.files().create(
+            body=file_metadata, media_body=media, fields="id"
+        ).execute()
+        log.info("Drive upload OK: %s/%s (id=%s)", site_id, local_path.name, result["id"])
+
+    except Exception:
+        log.exception("Drive upload failed for %s — local copy is safe.", local_path.name)
+
+
 def save_photo(site_id: str, extension: str, data: bytes, received_date: datetime) -> Path:
     """Write photo bytes to /photos/{site_id}/{YYYY-MM-DD}{ext} and return the path."""
     dest_dir = PHOTOS_ROOT / site_id
@@ -249,6 +313,7 @@ def process_email(imap: imaplib.IMAP4_SSL, uid: str, sites: dict) -> None:
 
     # ---- Save the photo ---------------------------------------------------
     saved_path = save_photo(site_id, extension, photo_data, received)
+    upload_to_drive(saved_path, site_id)
 
     site_info = sites[site_id]
     log.info(
