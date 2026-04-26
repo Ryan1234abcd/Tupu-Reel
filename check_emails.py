@@ -6,9 +6,10 @@ Tupureel photopoint monitoring — Gmail ingestion script.
 Connects to Gmail via IMAP, finds unread emails addressed to
 photos@tupureel.org, saves any photo attachments to a local folder
 tree, and labels each email as either "processed" or "unknown-site".
-After saving locally, each photo is also uploaded to Cloudflare R2 under
-{site_id}/{YYYY-MM-DD}.jpg.  R2 upload failures are logged but do not
-affect local saving.
+After saving locally, each photo is uploaded to Cloudflare R2 and a
+Telegram message is sent to the site's moderation channel so a human
+can Approve or Reject it (handled by telegram_bot.py).  Upload and
+notification failures are logged but do not affect local saving.
 
 Required environment variables (loaded from .env automatically):
     GMAIL_ADDRESS        — the Gmail account used to receive photos
@@ -17,11 +18,13 @@ Required environment variables (loaded from .env automatically):
     R2_ACCESS_KEY_ID     — R2 access key ID
     R2_SECRET_ACCESS_KEY — R2 secret access key
     R2_BUCKET_NAME       — R2 bucket name
+    TELEGRAM_TOKEN       — bot token from BotFather
 
 Usage:
     python check_emails.py
 """
 
+import asyncio
 import email
 import imaplib
 import logging
@@ -36,6 +39,7 @@ from pathlib import Path
 import boto3
 import yaml
 from dotenv import load_dotenv
+from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 
 # Load environment variables from .env (does nothing if file is absent).
 load_dotenv()
@@ -183,8 +187,11 @@ def mark_read(imap: imaplib.IMAP4_SSL, uid: str) -> None:
     imap.uid("STORE", uid, "+FLAGS", "\\Seen")
 
 
-def upload_to_r2(local_path: Path, site_id: str) -> None:
-    """Upload local_path to Cloudflare R2 under {site_id}/{YYYY-MM-DD}.jpg."""
+def upload_to_r2(local_path: Path, site_id: str) -> bool:
+    """Upload local_path to Cloudflare R2 under {site_id}/{YYYY-MM-DD}.jpg.
+
+    Returns True on success, False on failure.
+    """
     account_id = os.environ.get("R2_ACCOUNT_ID")
     access_key = os.environ.get("R2_ACCESS_KEY_ID")
     secret_key = os.environ.get("R2_SECRET_ACCESS_KEY")
@@ -192,7 +199,7 @@ def upload_to_r2(local_path: Path, site_id: str) -> None:
 
     if not all([account_id, access_key, secret_key, bucket]):
         log.debug("R2 env vars not set — skipping R2 upload.")
-        return
+        return False
 
     try:
         s3 = boto3.client(
@@ -204,9 +211,58 @@ def upload_to_r2(local_path: Path, site_id: str) -> None:
         key = f"{site_id}/{local_path.stem}.jpg"
         s3.upload_file(str(local_path), bucket, key)
         log.info("R2 upload OK: %s", key)
+        return True
 
     except Exception:
         log.exception("R2 upload failed for %s — local copy is safe.", local_path.name)
+        return False
+
+
+async def _send_moderation_message(
+    token: str,
+    chat_id: str,
+    local_path: Path,
+    site_name: str,
+    date_str: str,
+    r2_key: str,
+) -> None:
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✓ Approve", callback_data=f"approve:{r2_key}"),
+            InlineKeyboardButton("✗ Reject", callback_data=f"reject:{r2_key}"),
+        ]
+    ])
+    async with Bot(token=token) as bot:
+        with open(local_path, "rb") as fh:
+            await bot.send_photo(
+                chat_id=chat_id,
+                photo=fh,
+                caption=f"*{site_name}*  —  {date_str}",
+                parse_mode="Markdown",
+                reply_markup=keyboard,
+            )
+
+
+def send_for_moderation(
+    local_path: Path, site_id: str, site_info: dict, received: datetime
+) -> None:
+    """Send a Telegram moderation message with Approve / Reject buttons."""
+    token = os.environ.get("TELEGRAM_TOKEN")
+    chat_id = site_info.get("telegram_chat_id")
+
+    if not token or not chat_id:
+        log.debug("TELEGRAM_TOKEN or telegram_chat_id not set — skipping Telegram notification.")
+        return
+
+    r2_key = f"{site_id}/{local_path.stem}.jpg"
+    date_str = received.strftime("%Y-%m-%d")
+    site_name = site_info.get("name", site_id)
+
+    try:
+        asyncio.run(_send_moderation_message(token, str(chat_id), local_path, site_name, date_str, r2_key))
+        log.info("Telegram moderation message sent for %s", r2_key)
+    except Exception:
+        log.exception("Telegram notification failed for %s — R2 copy is safe.", local_path.name)
 
 
 def save_photo(site_id: str, extension: str, data: bytes, received_date: datetime) -> Path:
@@ -289,10 +345,8 @@ def process_email(imap: imaplib.IMAP4_SSL, uid: str, sites: dict) -> None:
         return
 
     # ---- Save the photo ---------------------------------------------------
-    saved_path = save_photo(site_id, extension, photo_data, received)
-    upload_to_r2(saved_path, site_id)
-
     site_info = sites[site_id]
+    saved_path = save_photo(site_id, extension, photo_data, received)
     log.info(
         "UID %s  site=%s (%s, %s): photo saved → %s",
         uid,
@@ -301,6 +355,9 @@ def process_email(imap: imaplib.IMAP4_SSL, uid: str, sites: dict) -> None:
         site_info.get("location", "?"),
         saved_path,
     )
+
+    if upload_to_r2(saved_path, site_id):
+        send_for_moderation(saved_path, site_id, site_info, received)
 
     # ---- Label + mark read ------------------------------------------------
     ensure_gmail_label(imap, LABEL_PROCESSED)
