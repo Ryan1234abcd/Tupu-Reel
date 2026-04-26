@@ -1,0 +1,9 @@
+sites:
+  DART-B-04:
+    name: Meadow Site B
+    location: Dartmoor Community Reserve
+    telegram_chat_id: "-123456789"
+  CHCH-A-01:
+    name: Bottle Lake Forest
+    location: Christchurch NZ
+    telegram_chat_id: "-987654321"
