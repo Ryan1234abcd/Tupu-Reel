@@ -1,0 +1,10 @@
+# Credentials — never commit this
+.env
+
+# Saved photos
+photos/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo

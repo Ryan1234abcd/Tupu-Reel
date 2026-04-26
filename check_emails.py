@@ -7,7 +7,7 @@ Connects to Gmail via IMAP, finds unread emails addressed to
 photos@tupureel.org, saves any photo attachments to a local folder
 tree, and labels each email as either "processed" or "unknown-site".
 
-Required environment variables:
+Required environment variables (loaded from .env automatically):
     GMAIL_ADDRESS      — the Gmail account used to receive photos
     GMAIL_APP_PASSWORD — a Gmail App Password (not your main password)
 
@@ -26,6 +26,10 @@ from email.header import decode_header
 from pathlib import Path
 
 import yaml
+from dotenv import load_dotenv
+
+# Load environment variables from .env (does nothing if file is absent).
+load_dotenv()
 
 # ---------------------------------------------------------------------------
 # Configuration
