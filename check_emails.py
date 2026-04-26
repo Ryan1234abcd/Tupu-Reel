@@ -129,7 +129,14 @@ def find_photo_attachment(msg: Message) -> tuple[str, bytes] | None:
     for part in msg.walk():
         if part.get_content_maintype() == "multipart":
             continue
-        if part.get("Content-Disposition") is None:
+
+        disposition = part.get("Content-Disposition", "")
+        if disposition.lower().startswith("inline"):
+            raw_filename = part.get_filename()
+            if raw_filename:
+                log.debug("Skipping inline image: %s", raw_filename)
+            continue
+        if not disposition.lower().startswith("attachment"):
             continue
 
         raw_filename = part.get_filename()
