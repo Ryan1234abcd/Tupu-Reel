@@ -7,10 +7,11 @@ Listens for Approve / Reject button presses on photo moderation messages
 sent by check_emails.py.
 
 Button tap sequence:
-  1. Immediately answer the callback query (toast popup) — must happen
-     within 10 s of the tap before the query expires.
-  2. Immediately edit the caption to show a ⏳ pending state and remove
-     the buttons so the message cannot be tapped twice.
+  1. Answer the callback query with a dismissable alert popup — must happen
+     within 10 s of the bot *receiving* the update.  If the query has
+     already expired the answer is skipped but processing continues.
+  2. Immediately edit the caption to a ⏳ pending state and remove the
+     buttons so the message cannot be tapped twice.
   3. Perform the actual work (R2 deletion for Reject; nothing for Approve).
   4. Edit the caption one final time to show the confirmed outcome.
 
@@ -58,18 +59,22 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     action, r2_key = data.split(":", 1)
-    original_caption = query.message.caption or ""
 
-    # ---- Step 1: answer immediately (Telegram requires this within 10 s) ----
-    if action == "approve":
-        await query.answer("✓ Response recorded")
-    elif action == "reject":
-        await query.answer("✗ Response recorded")
-    else:
+    if action not in ("approve", "reject"):
         await query.answer()
         return
 
-    # ---- Step 2: show pending state and remove buttons immediately ----------
+    original_caption = query.message.caption or ""
+
+    # ---- Step 1: answer immediately (required within 10 s of receiving the
+    # update; wrapped so an expired query never prevents the caption update) ---
+    toast = "✓ Response recorded" if action == "approve" else "✗ Response recorded"
+    try:
+        await query.answer(text=toast, show_alert=True)
+    except Exception:
+        log.warning("Could not send callback answer for %s (query may have expired)", r2_key)
+
+    # ---- Step 2: remove buttons and show pending state immediately -----------
     pending_caption = (
         f"{original_caption}\n\n⏳ Approved — will be processed at next run"
         if action == "approve"
@@ -77,7 +82,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     )
     await query.edit_message_caption(caption=pending_caption, reply_markup=None)
 
-    # ---- Step 3 & 4: do the work, then show the final outcome ---------------
+    # ---- Steps 3 & 4: do the work, then show the confirmed outcome -----------
     if action == "approve":
         await query.edit_message_caption(
             caption=f"{original_caption}\n\n✓ Approved — photo added to timelapse queue",
@@ -102,6 +107,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             )
 
 
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    log.exception("Unhandled error processing update: %s", context.error)
+
+
 def main() -> None:
     token = os.environ.get("TELEGRAM_TOKEN")
     if not token:
@@ -109,6 +118,7 @@ def main() -> None:
 
     app = ApplicationBuilder().token(token).build()
     app.add_handler(CallbackQueryHandler(button_handler))
+    app.add_error_handler(error_handler)
     log.info("Bot started — polling for updates.")
     app.run_polling()
 
