@@ -23,6 +23,7 @@ import re
 import sys
 from datetime import datetime
 from email.header import decode_header
+from email.message import Message
 from pathlib import Path
 
 import yaml
@@ -112,7 +113,7 @@ def extract_site_id(subject: str) -> str | None:
     return None
 
 
-def find_photo_attachment(msg: email.message.Message) -> tuple[str, bytes] | None:
+def find_photo_attachment(msg: Message) -> tuple[str, bytes] | None:
     """
     Walk the email MIME tree and return (filename, data) for the first
     recognised photo attachment, or None if none is found.
