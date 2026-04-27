@@ -80,10 +80,10 @@ def _r2_client():
 
 
 def list_site_photos(s3, bucket: str, site_id: str) -> list[str]:
-    """Return a sorted list of R2 keys for all photos in {site_id}/."""
+    """Return a sorted list of R2 keys for all approved photos in {site_id}/approved/."""
     paginator = s3.get_paginator("list_objects_v2")
     keys = []
-    for page in paginator.paginate(Bucket=bucket, Prefix=f"{site_id}/"):
+    for page in paginator.paginate(Bucket=bucket, Prefix=f"{site_id}/approved/"):
         for obj in page.get("Contents", []):
             key = obj["Key"]
             if key.lower().endswith(".jpg"):

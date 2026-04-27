@@ -6,13 +6,18 @@ Tupureel Telegram moderation bot.
 Listens for Approve / Reject button presses on photo moderation messages
 sent by check_emails.py.
 
+Photos live in R2 under {site_id}/pending/ when first uploaded.  On
+Approve the photo is moved to {site_id}/approved/; on Reject it is moved
+to {site_id}/rejected/.  Both operations are a copy-then-delete so the
+original is preserved until the destination is confirmed written.
+
 Button tap sequence:
   1. Answer the callback query with a dismissable alert popup — must happen
      within 10 s of the bot *receiving* the update.  If the query has
      already expired the answer is skipped but processing continues.
   2. Immediately edit the caption to a ⏳ pending state and remove the
      buttons so the message cannot be tapped twice.
-  3. Perform the actual work (R2 deletion for Reject; nothing for Approve).
+  3. Move the photo in R2 (copy to destination, delete source).
   4. Edit the caption one final time to show the confirmed outcome.
 
 Required environment variables (loaded from .env automatically):
@@ -50,6 +55,16 @@ def _r2_client():
     )
 
 
+def move_r2_object(s3, bucket: str, source_key: str, dest_key: str) -> None:
+    """Copy source_key to dest_key then delete the source."""
+    s3.copy_object(
+        Bucket=bucket,
+        CopySource={"Bucket": bucket, "Key": source_key},
+        Key=dest_key,
+    )
+    s3.delete_object(Bucket=bucket, Key=source_key)
+
+
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     data = query.data or ""
@@ -76,33 +91,44 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     # ---- Step 2: remove buttons and show pending state immediately -----------
     pending_caption = (
-        f"{original_caption}\n\n⏳ Approved — will be processed at next run"
+        f"{original_caption}\n\n⏳ Approved — moving to approved folder"
         if action == "approve"
-        else f"{original_caption}\n\n⏳ Rejected — will be processed at next run"
+        else f"{original_caption}\n\n⏳ Rejected — moving to rejected folder"
     )
     await query.edit_message_caption(caption=pending_caption, reply_markup=None)
 
-    # ---- Steps 3 & 4: do the work, then show the confirmed outcome -----------
-    if action == "approve":
-        await query.edit_message_caption(
-            caption=f"{original_caption}\n\n✓ Approved — photo added to timelapse queue",
-            reply_markup=None,
-        )
-        log.info("Approved: %s", r2_key)
+    # ---- Steps 3 & 4: move the file in R2, then show the confirmed outcome --
+    bucket = os.environ.get("R2_BUCKET_NAME", "")
 
-    elif action == "reject":
-        bucket = os.environ.get("R2_BUCKET_NAME", "")
+    if action == "approve":
+        dest_key = r2_key.replace("/pending/", "/approved/", 1)
         try:
-            _r2_client().delete_object(Bucket=bucket, Key=r2_key)
+            move_r2_object(_r2_client(), bucket, r2_key, dest_key)
             await query.edit_message_caption(
-                caption=f"{original_caption}\n\n✗ Rejected — photo removed from R2",
+                caption=f"{original_caption}\n\n✓ Approved — photo added to timelapse queue",
                 reply_markup=None,
             )
-            log.info("Rejected and deleted from R2: %s", r2_key)
+            log.info("Approved: moved %s → %s", r2_key, dest_key)
         except Exception:
-            log.exception("Failed to delete %s from R2", r2_key)
+            log.exception("Failed to move %s to approved/", r2_key)
             await query.edit_message_caption(
-                caption=f"{original_caption}\n\n✗ Rejected — R2 deletion failed (see logs)",
+                caption=f"{original_caption}\n\n✓ Approved — R2 move failed (see logs)",
+                reply_markup=None,
+            )
+
+    elif action == "reject":
+        dest_key = r2_key.replace("/pending/", "/rejected/", 1)
+        try:
+            move_r2_object(_r2_client(), bucket, r2_key, dest_key)
+            await query.edit_message_caption(
+                caption=f"{original_caption}\n\n✗ Rejected — photo moved to rejected folder",
+                reply_markup=None,
+            )
+            log.info("Rejected: moved %s → %s", r2_key, dest_key)
+        except Exception:
+            log.exception("Failed to move %s to rejected/", r2_key)
+            await query.edit_message_caption(
+                caption=f"{original_caption}\n\n✗ Rejected — R2 move failed (see logs)",
                 reply_markup=None,
             )
 

@@ -3,7 +3,19 @@ sites:
     name: Meadow Site B
     location: Dartmoor Community Reserve
     telegram_chat_id: "-123456789"
+    bearing: 180
+    landmark: "large oak tree at field edge"
+    contact_email: "dartmoor@example.com"
+    active: true
+    created: "2025-04-26"
+    notes: "Test site for Tupureel development"
   CHCH-A-01:
     name: Bottle Lake Forest
     location: Christchurch NZ
     telegram_chat_id: "-5211820190"
+    bearing: 247
+    landmark: "lone macrocarpa tree"
+    contact_email: "groupcontact@example.com"
+    active: true
+    created: "2025-04-26"
+    notes: "Test site for Tupureel development"

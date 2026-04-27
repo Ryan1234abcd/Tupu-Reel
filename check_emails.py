@@ -6,10 +6,11 @@ Tupureel photopoint monitoring — Gmail ingestion script.
 Connects to Gmail via IMAP, finds unread emails addressed to
 photos@tupureel.org, saves any photo attachments to a local folder
 tree, and labels each email as either "processed" or "unknown-site".
-After saving locally, each photo is uploaded to Cloudflare R2 and a
-Telegram message is sent to the site's moderation channel so a human
-can Approve or Reject it (handled by telegram_bot.py).  Upload and
-notification failures are logged but do not affect local saving.
+After saving locally, each photo is uploaded to Cloudflare R2 under
+{site_id}/pending/ and a Telegram message is sent to the site's
+moderation channel so a human can Approve or Reject it (handled by
+telegram_bot.py, which moves the file to approved/ or rejected/).
+Upload and notification failures are logged but do not affect local saving.
 
 Required environment variables (loaded from .env automatically):
     GMAIL_ADDRESS        — the Gmail account used to receive photos
@@ -208,7 +209,7 @@ def upload_to_r2(local_path: Path, site_id: str) -> bool:
             aws_access_key_id=access_key,
             aws_secret_access_key=secret_key,
         )
-        key = f"{site_id}/{local_path.stem}.jpg"
+        key = f"{site_id}/pending/{local_path.stem}.jpg"
         s3.upload_file(str(local_path), bucket, key)
         log.info("R2 upload OK: %s", key)
         return True
@@ -254,7 +255,7 @@ def send_for_moderation(
         log.debug("TELEGRAM_TOKEN or telegram_chat_id not set — skipping Telegram notification.")
         return
 
-    r2_key = f"{site_id}/{local_path.stem}.jpg"
+    r2_key = f"{site_id}/pending/{local_path.stem}.jpg"
     date_str = received.strftime("%Y-%m-%d")
     site_name = site_info.get("name", site_id)
 
@@ -344,8 +345,13 @@ def process_email(imap: imaplib.IMAP4_SSL, uid: str, sites: dict) -> None:
         mark_read(imap, uid)
         return
 
-    # ---- Save the photo ---------------------------------------------------
     site_info = sites[site_id]
+    if not site_info.get("active", True):
+        log.info("UID %s  site=%s: site is inactive — marking read and skipping.", uid, site_id)
+        mark_read(imap, uid)
+        return
+
+    # ---- Save the photo ---------------------------------------------------
     saved_path = save_photo(site_id, extension, photo_data, received)
     log.info(
         "UID %s  site=%s (%s, %s): photo saved → %s",
